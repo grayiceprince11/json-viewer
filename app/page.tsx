@@ -71,7 +71,7 @@ function findMatches(root: any, queryRaw: string, maxMatches = 200): Match[] {
     if (typeof node === 'object') {
       for (const k of Object.keys(node)) {
         if (k.toLowerCase().includes(q)) push({ path: pathJoin(path, k), kind: 'key', preview: k })
-        visit(node[k], pathJoin(path, k))
+        visit((node as any)[k], pathJoin(path, k))
         if (out.length >= maxMatches) break
       }
       return
@@ -85,107 +85,251 @@ function findMatches(root: any, queryRaw: string, maxMatches = 200): Match[] {
   return out
 }
 
-/**
- * Pre-collapse specific keys everywhere (e.g. "meta") by wrapping them as:
- *   meta: { preview: "meta (N keys)", value: { ...actual meta... } }
- * This makes "meta" appear compact by default in the viewer.
- */
-function collapseKeysEverywhere(root: any, keysToCollapse = new Set(['meta'])): any {
-  const wrap = (k: string, v: any) => {
-    const keyCount =
-      v && typeof v === 'object' && !Array.isArray(v) ? Object.keys(v as Record<string, any>).length : 0
-    return { preview: `${k} (${keyCount} keys)`, value: v }
-  }
+/* ----------------------------- Form (click-to-expand) ----------------------------- */
 
-  const visit = (node: any): any => {
-    if (node === null || node === undefined) return node
-    if (Array.isArray(node)) return node.map(visit)
-    if (typeof node !== 'object') return node
+type Seg = string | number
 
-    const out: any = {}
-    for (const [k, v] of Object.entries(node)) {
-      if (keysToCollapse.has(k) && v && typeof v === 'object') {
-        out[k] = wrap(k, visit(v))
-      } else {
-        out[k] = visit(v)
-      }
-    }
-    return out
-  }
-
-  return visit(root)
+function segToPointer(seg: Seg) {
+  // Encode to keep pointer stable even with weird keys
+  return encodeURIComponent(String(seg))
 }
 
-/** "Form" view (read-only), similar vibe to jsonformatter.org */
-function FormView({ value }: { value: any }) {
-  if (value === null) return <div style={{ color: 'var(--m-muted)' }}>null</div>
-  if (typeof value !== 'object') return <div style={{ color: 'var(--m-muted)' }}>{String(value)}</div>
+function pointerFromSegments(segs: Seg[]) {
+  if (segs.length === 0) return '/'
+  return '/' + segs.map(segToPointer).join('/')
+}
 
-  if (Array.isArray(value)) {
+function isExpandable(v: any) {
+  return v !== null && typeof v === 'object'
+}
+
+function countLabel(v: any) {
+  if (!isExpandable(v)) return ''
+  if (Array.isArray(v)) return `[${v.length}]`
+  return `{${Object.keys(v).length}}`
+}
+
+function summarizeValue(v: any) {
+  if (v === null) return 'null'
+  const t = typeof v
+  if (t === 'string') return v.length > 160 ? `${v.slice(0, 160)}…` : v
+  if (t === 'number' || t === 'boolean') return String(v)
+  if (Array.isArray(v)) return `Array ${countLabel(v)}`
+  if (t === 'object') return `Object ${countLabel(v)}`
+  return String(v)
+}
+
+function collectExpandablePointers(root: any, limit = 6000): Set<string> {
+  const out = new Set<string>()
+  const walk = (node: any, segs: Seg[]) => {
+    if (out.size >= limit) return
+    if (!isExpandable(node)) return
+    out.add(pointerFromSegments(segs))
+    if (Array.isArray(node)) {
+      for (let i = 0; i < node.length; i++) {
+        walk(node[i], [...segs, i])
+        if (out.size >= limit) break
+      }
+    } else {
+      for (const k of Object.keys(node)) {
+        walk((node as any)[k], [...segs, k])
+        if (out.size >= limit) break
+      }
+    }
+  }
+  walk(root, [])
+  return out
+}
+
+function FormViewer({
+  value,
+  toast,
+}: {
+  value: any
+  toast: (msg: string) => void
+}) {
+  // default like jsonformatter: root expanded, children collapsed
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set<string>(['/']))
+  const [selected, setSelected] = useState<Seg[]>([]) // breadcrumb
+
+  const rootPointer = '/'
+  const selectedPointer = pointerFromSegments(selected)
+
+  const toggle = (segs: Seg[]) => {
+    const p = pointerFromSegments(segs)
+    setExpanded((prev) => {
+      const next = new Set(prev)
+      if (next.has(p)) next.delete(p)
+      else next.add(p)
+      next.add(rootPointer) // keep root open
+      return next
+    })
+  }
+
+  const ensureOpen = (segs: Seg[]) => {
+    // opens all ancestors so selecting a deep node shows it
+    const pointers: string[] = [rootPointer]
+    for (let i = 0; i < segs.length; i++) {
+      pointers.push(pointerFromSegments(segs.slice(0, i + 1)))
+    }
+    setExpanded((prev) => {
+      const next = new Set(prev)
+      pointers.forEach((p) => next.add(p))
+      return next
+    })
+  }
+
+  const onSelect = (segs: Seg[]) => {
+    setSelected(segs)
+    ensureOpen(segs)
+  }
+
+  const expandAll = () => {
+    const set = collectExpandablePointers(value, 6000)
+    if (set.size >= 6000) toast('Large JSON: expanded many nodes (capped).')
+    set.add(rootPointer)
+    setExpanded(set)
+  }
+
+  const collapseAll = () => {
+    setExpanded(new Set([rootPointer]))
+  }
+
+  const renderNode = (node: any, segs: Seg[], depth: number) => {
+    if (!isExpandable(node)) return null
+
+    const isArr = Array.isArray(node)
+    const keys: Seg[] = isArr ? node.map((_: any, i: number) => i) : Object.keys(node)
+
     return (
-      <div style={{ display: 'grid', gap: 10 }}>
-        {value.slice(0, 200).map((item, idx) => (
-          <div key={idx} style={{ border: '1px solid var(--m-border)', borderRadius: 12, padding: 10 }}>
-            <div style={{ fontWeight: 800, color: 'var(--m-muted)', marginBottom: 8 }}>Row {idx}</div>
-            <KeyValueTable obj={item} />
-          </div>
-        ))}
-        {value.length > 200 ? (
-          <div style={{ color: 'var(--m-muted)', fontSize: 12 }}>
-            Showing first 200 rows (Form view). Use Tree/Code for full.
-          </div>
-        ) : null}
+      <div>
+        {keys.map((k) => {
+          const child = isArr ? node[k as number] : (node as any)[k as string]
+          const childSegs = [...segs, k]
+          const p = pointerFromSegments(childSegs)
+          const expandable = isExpandable(child)
+          const open = expanded.has(p)
+          const label = typeof k === 'number' ? `[${k}]` : String(k)
+
+          return (
+            <div key={p} style={{ marginLeft: depth === 0 ? 0 : 16 }}>
+              <div style={styles.formRow}>
+                {expandable ? (
+                  <button
+                    style={styles.caretBtn}
+                    onClick={() => toggle(childSegs)}
+                    aria-label={open ? 'Collapse' : 'Expand'}
+                  >
+                    {open ? '▾' : '▸'}
+                  </button>
+                ) : (
+                  <div style={{ width: 28 }} />
+                )}
+
+                <button
+                  style={{
+                    ...styles.formKeyBtn,
+                    background: selectedPointer === p ? 'rgba(107,99,255,0.18)' : 'transparent',
+                  }}
+                  onClick={() => onSelect(childSegs)}
+                  title={p}
+                >
+                  <span style={styles.formKey}>{label}</span>
+                  {expandable ? <span style={styles.formCount}>{countLabel(child)}</span> : null}
+                </button>
+
+                <div style={styles.formValue}>
+                  {expandable ? (
+                    <button style={styles.formValueBtn} onClick={() => toggle(childSegs)}>
+                      {summarizeValue(child)}
+                    </button>
+                  ) : (
+                    <span style={styles.formPrimitive}>{summarizeValue(child)}</span>
+                  )}
+                </div>
+              </div>
+
+              {expandable && open ? (
+                <div style={{ marginLeft: 18, marginTop: 6, marginBottom: 8 }}>
+                  {isArr || typeof child === 'object' ? renderNode(child, childSegs, depth + 1) : null}
+                  {!Array.isArray(child) && typeof child === 'object' ? (
+                    // show primitive fields (object rows already show primitives inline),
+                    // so nothing extra needed
+                    null
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+          )
+        })}
       </div>
     )
   }
 
-  return <KeyValueTable obj={value} />
-}
+  const breadcrumbParts: { label: string; segs: Seg[] }[] = [
+    { label: 'object', segs: [] },
+    ...selected.map((seg, idx) => ({
+      label: typeof seg === 'number' ? `[${seg}]` : String(seg),
+      segs: selected.slice(0, idx + 1),
+    })),
+  ]
 
-function KeyValueTable({ obj }: { obj: any }) {
-  if (obj === null) return <div style={{ color: 'var(--m-muted)' }}>null</div>
-  if (typeof obj !== 'object') return <div style={{ color: 'var(--m-muted)' }}>{String(obj)}</div>
-  if (Array.isArray(obj)) return <div style={{ color: 'var(--m-muted)' }}>Array({obj.length})</div>
+  const rootTypeLabel = value === null ? 'null' : Array.isArray(value) ? `array ${countLabel(value)}` : `object ${countLabel(value)}`
 
-  const entries = Object.entries(obj as Record<string, any>)
   return (
-    <div style={{ display: 'grid', gap: 8 }}>
-      {entries.map(([k, v]) => (
-        <div
-          key={k}
-          style={{
-            display: 'grid',
-            gridTemplateColumns: '220px 1fr',
-            gap: 10,
-            padding: '8px 10px',
-            border: '1px solid var(--m-border)',
-            borderRadius: 12,
-            background: 'rgba(255,255,255,0.02)',
-          }}
-        >
-          <div style={{ fontWeight: 800, fontSize: 12 }}>{k}</div>
-          <div style={{ color: 'var(--m-muted)', fontSize: 12, whiteSpace: 'pre-wrap' }}>
-            {renderFormValue(v)}
+    <div>
+      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 10, alignItems: 'center' }}>
+        <button style={styles.btn} onClick={expandAll}>Expand all (Form)</button>
+        <button style={styles.btn} onClick={collapseAll}>Collapse all (Form)</button>
+
+        <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <div style={{ color: 'var(--m-muted)', fontSize: 12 }}>Breadcrumb:</div>
+          <div style={styles.breadcrumb}>
+            {breadcrumbParts.map((b, i) => (
+              <span key={i} style={{ display: 'inline-flex', gap: 8, alignItems: 'center' }}>
+                <button
+                  style={styles.crumbBtn}
+                  onClick={() => onSelect(b.segs)}
+                  title={pointerFromSegments(b.segs)}
+                >
+                  {b.label}
+                </button>
+                {i < breadcrumbParts.length - 1 ? <span style={{ color: 'var(--m-muted)' }}>{'>'}</span> : null}
+              </span>
+            ))}
           </div>
         </div>
-      ))}
+      </div>
+
+      <div style={{ ...styles.codeBlock, padding: 0 }}>
+        {/* Root header row, like jsonformatter "object {n}" */}
+        <div style={{ ...styles.formRow, borderBottom: '1px solid var(--m-border)' }}>
+          <button style={styles.caretBtn} onClick={() => toggle([])} aria-label="Toggle root">
+            {expanded.has(rootPointer) ? '▾' : '▸'}
+          </button>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <span style={{ ...styles.formKey, fontWeight: 800 }}>{rootTypeLabel}</span>
+          </div>
+          <div style={styles.formValue} />
+        </div>
+
+        <div style={{ padding: 10 }}>
+          {expanded.has(rootPointer) ? renderNode(value, [], 0) : null}
+        </div>
+      </div>
     </div>
   )
 }
 
-function renderFormValue(v: any) {
-  if (v === null) return 'null'
-  if (typeof v === 'string') return v
-  if (typeof v === 'number' || typeof v === 'boolean') return String(v)
-  if (Array.isArray(v)) return `Array(${v.length})`
-  if (typeof v === 'object') return `Object(${Object.keys(v).length})`
-  return String(v)
-}
+/* ------------------------------------ Page ------------------------------------ */
 
 export default function Page() {
   const [raw, setRaw] = useState('{\n  "hello": "paste JSON here"\n}')
   const [autoFormat, setAutoFormat] = useState(true)
-  const [collapsed, setCollapsed] = useState<boolean | number>(2) // number = collapse depth
+
+  // Tree default: root expanded, children collapsed (matches your screenshot)
+  const [collapsed, setCollapsed] = useState<boolean | number>(1)
+
   const [viewerKey, setViewerKey] = useState(0) // forces remount for expand/collapse
   const [search, setSearch] = useState('')
   const [urlToLoad, setUrlToLoad] = useState('')
@@ -230,11 +374,6 @@ export default function Page() {
   }, [raw])
 
   const parsed = useMemo(() => safeJsonParse(raw), [raw])
-
-  const displayJson = useMemo(() => {
-    if (!parsed.ok) return null
-    return collapseKeysEverywhere(parsed.value ?? {}, new Set(['meta']))
-  }, [parsed])
 
   const matches = useMemo(() => {
     if (!parsed.ok) return []
@@ -287,13 +426,19 @@ export default function Page() {
     showToast('Minified')
   }
 
-  const expandAll = () => {
+  const expandAllTree = () => {
     setCollapsed(false)
     setViewerKey((k) => k + 1)
   }
 
-  const collapseAll = () => {
+  const collapseAllTree = () => {
     setCollapsed(true)
+    setViewerKey((k) => k + 1)
+  }
+
+  const resetTreeDefault = () => {
+    // root expanded, children collapsed
+    setCollapsed(1)
     setViewerKey((k) => k + 1)
   }
 
@@ -312,7 +457,7 @@ export default function Page() {
     }
   }
 
-  // Gentler auto-format
+  // Gentle auto-format
   useEffect(() => {
     if (!autoFormat) return
     const res = safeJsonParse(raw)
@@ -322,8 +467,6 @@ export default function Page() {
     if (pretty !== raw) setRaw(pretty)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoFormat])
-
-  const treeCollapsed = collapsed
 
   const pageBg =
     theme === 'dark'
@@ -335,10 +478,6 @@ export default function Page() {
   return (
     <div style={{ ...styles.page, background: pageBg }}>
       <style>{`
-        :root{
-          --m-radius: 14px;
-        }
-
         :root[data-theme="dark"]{
           --m-bg: #0b0b12;
           --m-panel: rgba(255,255,255,0.06);
@@ -350,7 +489,6 @@ export default function Page() {
           --m-input: rgba(0,0,0,0.25);
           --m-btn: rgba(255,255,255,0.06);
         }
-
         :root[data-theme="light"]{
           --m-bg: #f6f7fb;
           --m-panel: rgba(0,0,0,0.04);
@@ -362,10 +500,8 @@ export default function Page() {
           --m-input: rgba(255,255,255,0.92);
           --m-btn: rgba(255,255,255,0.75);
         }
-
         * { box-sizing: border-box; }
-        button { font: inherit; }
-        select { font: inherit; }
+        button, select { font: inherit; }
       `}</style>
 
       {/* Header */}
@@ -385,8 +521,12 @@ export default function Page() {
       <div style={styles.toolbar}>
         <button style={styles.btn} onClick={doFormat}>Format</button>
         <button style={styles.btn} onClick={doMinify}>Minify</button>
-        <button style={styles.btn} onClick={expandAll}>Expand all</button>
-        <button style={styles.btn} onClick={collapseAll}>Collapse all</button>
+
+        {/* Tree controls (still useful even if you’re in other views) */}
+        <button style={styles.btn} onClick={expandAllTree}>Expand all (Tree)</button>
+        <button style={styles.btn} onClick={collapseAllTree}>Collapse all (Tree)</button>
+        <button style={styles.btn} onClick={resetTreeDefault}>Default (Tree)</button>
+
         <button style={styles.btn} onClick={downloadJson}>Download</button>
         <button style={styles.btnPrimary} onClick={copyShareLink}>Copy share link</button>
 
@@ -416,10 +556,10 @@ export default function Page() {
         <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 10 }}>
           <div style={styles.label}>View</div>
           <select value={viewMode} onChange={(e) => setViewMode(e.target.value as any)} style={styles.select}>
-            <option value="code">Code</option>
-            <option value="form">Form</option>
-            <option value="text">Text</option>
             <option value="tree">Tree</option>
+            <option value="form">Form</option>
+            <option value="code">Code</option>
+            <option value="text">Text</option>
           </select>
           {toast ? <div style={{ color: 'var(--m-muted)', fontSize: 12 }}>{toast}</div> : null}
         </div>
@@ -515,36 +655,36 @@ export default function Page() {
 
         <div style={styles.panel}>
           <div style={styles.sectionTitle}>Output</div>
+
           <div style={{ marginTop: 10 }}>
             {!parsed.ok ? (
               <div style={{ color: 'var(--m-muted)' }}>Fix JSON to see outputs.</div>
             ) : viewMode === 'tree' ? (
               <ReactJson
                 key={viewerKey}
-                src={displayJson ?? {}}
+                src={parsed.value ?? {}}
                 name={null}
-                collapsed={treeCollapsed}
+                collapsed={collapsed}
                 enableClipboard={true}
                 displayDataTypes={false}
                 displayObjectSize={true}
                 theme={rjvTheme}
+                // read-only
                 onEdit={false as any}
                 onAdd={false as any}
                 onDelete={false as any}
               />
+            ) : viewMode === 'form' ? (
+              <FormViewer value={parsed.value ?? {}} toast={showToast} />
             ) : viewMode === 'code' ? (
               <pre style={styles.codeBlock}>{JSON.stringify(parsed.value ?? {}, null, 2)}</pre>
-            ) : viewMode === 'text' ? (
-              <pre style={styles.codeBlock}>{raw}</pre>
             ) : (
-              <FormView value={parsed.value ?? {}} />
+              <pre style={styles.codeBlock}>{raw}</pre>
             )}
           </div>
+
           <div style={{ marginTop: 12, color: 'var(--m-muted)', fontSize: 12 }}>
             Tip: Share links encode JSON in the URL hash. Avoid sensitive data; very large JSON may exceed URL limits.
-          </div>
-          <div style={{ marginTop: 6, color: 'var(--m-muted)', fontSize: 12 }}>
-            Note: “meta” keys are shown compactly via meta.preview + meta.value.
           </div>
         </div>
       </div>
@@ -664,6 +804,101 @@ const styles: Record<string, React.CSSProperties> = {
   },
   mono: {
     fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+    fontSize: 12,
+  },
+
+  // Form styles
+  formRow: {
+    display: 'grid',
+    gridTemplateColumns: '28px 260px 1fr',
+    gap: 10,
+    alignItems: 'center',
+    padding: '6px 8px',
+    borderRadius: 10,
+  },
+  caretBtn: {
+    width: 28,
+    height: 28,
+    borderRadius: 10,
+    border: '1px solid var(--m-border)',
+    background: 'var(--m-btn)',
+    color: 'var(--m-text)',
+    cursor: 'pointer',
+    display: 'grid',
+    placeItems: 'center',
+    lineHeight: 1,
+  },
+  formKeyBtn: {
+    textAlign: 'left',
+    border: '1px solid var(--m-border)',
+    background: 'transparent',
+    color: 'var(--m-text)',
+    padding: '6px 8px',
+    borderRadius: 10,
+    cursor: 'pointer',
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+    overflow: 'hidden',
+  },
+  formKey: {
+    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+    fontSize: 13,
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+  },
+  formCount: {
+    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+    fontSize: 13,
+    color: 'var(--m-muted)',
+    flex: 'none',
+  },
+  formValue: {
+    minWidth: 0,
+  },
+  formValueBtn: {
+    width: '100%',
+    textAlign: 'left',
+    border: '1px solid var(--m-border)',
+    background: 'rgba(255,255,255,0.02)',
+    color: 'var(--m-muted)',
+    padding: '6px 8px',
+    borderRadius: 10,
+    cursor: 'pointer',
+    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+    fontSize: 13,
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+  },
+  formPrimitive: {
+    display: 'inline-block',
+    width: '100%',
+    border: '1px solid var(--m-border)',
+    background: 'rgba(255,255,255,0.02)',
+    color: 'var(--m-muted)',
+    padding: '6px 8px',
+    borderRadius: 10,
+    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+    fontSize: 13,
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+  },
+  breadcrumb: {
+    display: 'flex',
+    gap: 8,
+    alignItems: 'center',
+    flexWrap: 'wrap',
+  },
+  crumbBtn: {
+    border: '1px solid var(--m-border)',
+    background: 'var(--m-btn)',
+    color: 'var(--m-text)',
+    padding: '4px 8px',
+    borderRadius: 999,
+    cursor: 'pointer',
     fontSize: 12,
   },
 }
