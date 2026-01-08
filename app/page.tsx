@@ -85,6 +85,37 @@ function findMatches(root: any, queryRaw: string, maxMatches = 200): Match[] {
   return out
 }
 
+/**
+ * Pre-collapse specific keys everywhere (e.g. "meta") by wrapping them as:
+ *   meta: { preview: "meta (N keys)", value: { ...actual meta... } }
+ * This makes "meta" appear compact by default in the viewer.
+ */
+function collapseKeysEverywhere(root: any, keysToCollapse = new Set(['meta'])): any {
+  const wrap = (k: string, v: any) => {
+    const keyCount =
+      v && typeof v === 'object' && !Array.isArray(v) ? Object.keys(v as Record<string, any>).length : 0
+    return { preview: `${k} (${keyCount} keys)`, value: v }
+  }
+
+  const visit = (node: any): any => {
+    if (node === null || node === undefined) return node
+    if (Array.isArray(node)) return node.map(visit)
+    if (typeof node !== 'object') return node
+
+    const out: any = {}
+    for (const [k, v] of Object.entries(node)) {
+      if (keysToCollapse.has(k) && v && typeof v === 'object') {
+        out[k] = wrap(k, visit(v))
+      } else {
+        out[k] = visit(v)
+      }
+    }
+    return out
+  }
+
+  return visit(root)
+}
+
 export default function Page() {
   const [raw, setRaw] = useState('{\n  "hello": "paste JSON here"\n}')
   const [autoFormat, setAutoFormat] = useState(true)
@@ -133,6 +164,11 @@ export default function Page() {
 
   const parsed = useMemo(() => safeJsonParse(raw), [raw])
 
+  const displayJson = useMemo(() => {
+    if (!parsed.ok) return null
+    return collapseKeysEverywhere(parsed.value ?? {}, new Set(['meta']))
+  }, [parsed])
+
   const matches = useMemo(() => {
     if (!parsed.ok) return []
     if (search.trim().length < 2) return []
@@ -164,6 +200,7 @@ export default function Page() {
   const onUpload = async (file?: File | null) => {
     if (!file) return
     setRaw(await file.text())
+    setViewerKey((k) => k + 1)
     showToast('Loaded file')
   }
 
@@ -171,6 +208,7 @@ export default function Page() {
     const res = formatJson(raw)
     if (!res.ok) return showToast(`Invalid JSON: ${res.error}`)
     setRaw(res.value)
+    setViewerKey((k) => k + 1)
     showToast('Formatted')
   }
 
@@ -178,6 +216,7 @@ export default function Page() {
     const res = minifyJson(raw)
     if (!res.ok) return showToast(`Invalid JSON: ${res.error}`)
     setRaw(res.value)
+    setViewerKey((k) => k + 1)
     showToast('Minified')
   }
 
@@ -199,7 +238,6 @@ export default function Page() {
       const j = await r.json()
       if (!r.ok) return showToast(j?.error ?? 'Failed')
       setRaw(j.text)
-      // keep tree collapsed depth after load; just refresh viewer
       setViewerKey((k) => k + 1)
       showToast('Loaded URL')
     } catch (e: any) {
@@ -218,7 +256,7 @@ export default function Page() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoFormat])
 
-  // IMPORTANT: let buttons control collapse/expand (don’t override during search)
+  // Let buttons control collapse/expand
   const treeCollapsed = collapsed
 
   // Theme-aware page background gradient
@@ -407,7 +445,7 @@ export default function Page() {
             {parsed.ok ? (
               <ReactJson
                 key={viewerKey} // force remount so expand/collapse always works
-                src={parsed.value ?? {}}
+                src={displayJson ?? {}}
                 name={null}
                 collapsed={treeCollapsed}
                 enableClipboard={true}
@@ -425,6 +463,9 @@ export default function Page() {
           </div>
           <div style={{ marginTop: 12, color: 'var(--m-muted)', fontSize: 12 }}>
             Tip: Share links encode JSON in the URL hash. Avoid sensitive data; very large JSON may exceed URL limits.
+          </div>
+          <div style={{ marginTop: 6, color: 'var(--m-muted)', fontSize: 12 }}>
+            Note: “meta” keys are shown in a compact wrapper: meta.preview + meta.value.
           </div>
         </div>
       </div>
