@@ -116,6 +116,72 @@ function collapseKeysEverywhere(root: any, keysToCollapse = new Set(['meta'])): 
   return visit(root)
 }
 
+/** "Form" view (read-only), similar vibe to jsonformatter.org */
+function FormView({ value }: { value: any }) {
+  if (value === null) return <div style={{ color: 'var(--m-muted)' }}>null</div>
+  if (typeof value !== 'object') return <div style={{ color: 'var(--m-muted)' }}>{String(value)}</div>
+
+  if (Array.isArray(value)) {
+    return (
+      <div style={{ display: 'grid', gap: 10 }}>
+        {value.slice(0, 200).map((item, idx) => (
+          <div key={idx} style={{ border: '1px solid var(--m-border)', borderRadius: 12, padding: 10 }}>
+            <div style={{ fontWeight: 800, color: 'var(--m-muted)', marginBottom: 8 }}>Row {idx}</div>
+            <KeyValueTable obj={item} />
+          </div>
+        ))}
+        {value.length > 200 ? (
+          <div style={{ color: 'var(--m-muted)', fontSize: 12 }}>
+            Showing first 200 rows (Form view). Use Tree/Code for full.
+          </div>
+        ) : null}
+      </div>
+    )
+  }
+
+  return <KeyValueTable obj={value} />
+}
+
+function KeyValueTable({ obj }: { obj: any }) {
+  if (obj === null) return <div style={{ color: 'var(--m-muted)' }}>null</div>
+  if (typeof obj !== 'object') return <div style={{ color: 'var(--m-muted)' }}>{String(obj)}</div>
+  if (Array.isArray(obj)) return <div style={{ color: 'var(--m-muted)' }}>Array({obj.length})</div>
+
+  const entries = Object.entries(obj as Record<string, any>)
+  return (
+    <div style={{ display: 'grid', gap: 8 }}>
+      {entries.map(([k, v]) => (
+        <div
+          key={k}
+          style={{
+            display: 'grid',
+            gridTemplateColumns: '220px 1fr',
+            gap: 10,
+            padding: '8px 10px',
+            border: '1px solid var(--m-border)',
+            borderRadius: 12,
+            background: 'rgba(255,255,255,0.02)',
+          }}
+        >
+          <div style={{ fontWeight: 800, fontSize: 12 }}>{k}</div>
+          <div style={{ color: 'var(--m-muted)', fontSize: 12, whiteSpace: 'pre-wrap' }}>
+            {renderFormValue(v)}
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function renderFormValue(v: any) {
+  if (v === null) return 'null'
+  if (typeof v === 'string') return v
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v)
+  if (Array.isArray(v)) return `Array(${v.length})`
+  if (typeof v === 'object') return `Object(${Object.keys(v).length})`
+  return String(v)
+}
+
 export default function Page() {
   const [raw, setRaw] = useState('{\n  "hello": "paste JSON here"\n}')
   const [autoFormat, setAutoFormat] = useState(true)
@@ -125,6 +191,7 @@ export default function Page() {
   const [urlToLoad, setUrlToLoad] = useState('')
   const [toast, setToast] = useState('')
   const [theme, setTheme] = useState<'dark' | 'light'>('dark')
+  const [viewMode, setViewMode] = useState<'tree' | 'code' | 'text' | 'form'>('tree')
 
   // Load theme
   useEffect(() => {
@@ -157,7 +224,7 @@ export default function Page() {
     if (saved) setRaw(saved)
   }, [])
 
-  // Persist JSON (so experts don’t lose it if they refresh)
+  // Persist JSON
   useEffect(() => {
     window.localStorage.setItem(LS_JSON_KEY, raw)
   }, [raw])
@@ -245,7 +312,7 @@ export default function Page() {
     }
   }
 
-  // Gentler auto-format (only formats when JSON is valid and looks unformatted)
+  // Gentler auto-format
   useEffect(() => {
     if (!autoFormat) return
     const res = safeJsonParse(raw)
@@ -256,16 +323,13 @@ export default function Page() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoFormat])
 
-  // Let buttons control collapse/expand
   const treeCollapsed = collapsed
 
-  // Theme-aware page background gradient
   const pageBg =
     theme === 'dark'
       ? 'radial-gradient(900px 500px at 20% 0%, rgba(107,99,255,0.35), transparent 60%), var(--m-bg)'
       : 'radial-gradient(900px 500px at 20% 0%, rgba(107,99,255,0.18), transparent 60%), var(--m-bg)'
 
-  // Theme-aware JSON viewer theme
   const rjvTheme = theme === 'dark' ? ('monokai' as any) : ('rjv-default' as any)
 
   return (
@@ -301,6 +365,7 @@ export default function Page() {
 
         * { box-sizing: border-box; }
         button { font: inherit; }
+        select { font: inherit; }
       `}</style>
 
       {/* Header */}
@@ -348,7 +413,16 @@ export default function Page() {
           {theme === 'dark' ? 'Light mode' : 'Dark mode'}
         </button>
 
-        {toast ? <div style={{ marginLeft: 'auto', color: 'var(--m-muted)', fontSize: 12 }}>{toast}</div> : <div style={{ marginLeft: 'auto' }} />}
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 10 }}>
+          <div style={styles.label}>View</div>
+          <select value={viewMode} onChange={(e) => setViewMode(e.target.value as any)} style={styles.select}>
+            <option value="code">Code</option>
+            <option value="form">Form</option>
+            <option value="text">Text</option>
+            <option value="tree">Tree</option>
+          </select>
+          {toast ? <div style={{ color: 'var(--m-muted)', fontSize: 12 }}>{toast}</div> : null}
+        </div>
       </div>
 
       {/* URL Load + Search */}
@@ -440,11 +514,13 @@ export default function Page() {
         </div>
 
         <div style={styles.panel}>
-          <div style={styles.sectionTitle}>Viewer</div>
+          <div style={styles.sectionTitle}>Output</div>
           <div style={{ marginTop: 10 }}>
-            {parsed.ok ? (
+            {!parsed.ok ? (
+              <div style={{ color: 'var(--m-muted)' }}>Fix JSON to see outputs.</div>
+            ) : viewMode === 'tree' ? (
               <ReactJson
-                key={viewerKey} // force remount so expand/collapse always works
+                key={viewerKey}
                 src={displayJson ?? {}}
                 name={null}
                 collapsed={treeCollapsed}
@@ -452,20 +528,23 @@ export default function Page() {
                 displayDataTypes={false}
                 displayObjectSize={true}
                 theme={rjvTheme}
-                // Read-only for non-tech users
                 onEdit={false as any}
                 onAdd={false as any}
                 onDelete={false as any}
               />
+            ) : viewMode === 'code' ? (
+              <pre style={styles.codeBlock}>{JSON.stringify(parsed.value ?? {}, null, 2)}</pre>
+            ) : viewMode === 'text' ? (
+              <pre style={styles.codeBlock}>{raw}</pre>
             ) : (
-              <div style={{ color: 'var(--m-muted)' }}>Fix JSON to see tree view.</div>
+              <FormView value={parsed.value ?? {}} />
             )}
           </div>
           <div style={{ marginTop: 12, color: 'var(--m-muted)', fontSize: 12 }}>
             Tip: Share links encode JSON in the URL hash. Avoid sensitive data; very large JSON may exceed URL limits.
           </div>
           <div style={{ marginTop: 6, color: 'var(--m-muted)', fontSize: 12 }}>
-            Note: “meta” keys are shown in a compact wrapper: meta.preview + meta.value.
+            Note: “meta” keys are shown compactly via meta.preview + meta.value.
           </div>
         </div>
       </div>
@@ -538,6 +617,14 @@ const styles: Record<string, React.CSSProperties> = {
   },
   toggle: { display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px' },
   label: { fontWeight: 800, fontSize: 12, color: 'var(--m-muted)' },
+  select: {
+    padding: '8px 10px',
+    borderRadius: 12,
+    border: '1px solid var(--m-border)',
+    background: 'var(--m-input)',
+    color: 'var(--m-text)',
+    outline: 'none',
+  },
   input: {
     flex: 1,
     minWidth: 240,
@@ -562,6 +649,18 @@ const styles: Record<string, React.CSSProperties> = {
     lineHeight: 1.35,
     resize: 'vertical',
     outline: 'none',
+  },
+  codeBlock: {
+    margin: 0,
+    padding: 12,
+    borderRadius: 12,
+    border: '1px solid var(--m-border)',
+    background: 'var(--m-input)',
+    overflow: 'auto',
+    maxHeight: 650,
+    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+    fontSize: 13,
+    lineHeight: 1.35,
   },
   mono: {
     fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
