@@ -89,6 +89,7 @@ export default function Page() {
   const [raw, setRaw] = useState('{\n  "hello": "paste JSON here"\n}')
   const [autoFormat, setAutoFormat] = useState(true)
   const [collapsed, setCollapsed] = useState<boolean | number>(2) // number = collapse depth
+  const [viewerKey, setViewerKey] = useState(0) // forces remount for expand/collapse
   const [search, setSearch] = useState('')
   const [urlToLoad, setUrlToLoad] = useState('')
   const [toast, setToast] = useState('')
@@ -180,8 +181,15 @@ export default function Page() {
     showToast('Minified')
   }
 
-  const expandAll = () => setCollapsed(false)
-  const collapseAll = () => setCollapsed(true)
+  const expandAll = () => {
+    setCollapsed(false)
+    setViewerKey((k) => k + 1)
+  }
+
+  const collapseAll = () => {
+    setCollapsed(true)
+    setViewerKey((k) => k + 1)
+  }
 
   const loadFromUrl = async () => {
     if (!urlToLoad.trim()) return
@@ -191,34 +199,35 @@ export default function Page() {
       const j = await r.json()
       if (!r.ok) return showToast(j?.error ?? 'Failed')
       setRaw(j.text)
+      // keep tree collapsed depth after load; just refresh viewer
+      setViewerKey((k) => k + 1)
       showToast('Loaded URL')
     } catch (e: any) {
       showToast(e?.message ?? 'Failed')
     }
   }
 
-  // Optional: gentler auto-format (only formats when JSON is valid and looks unformatted)
+  // Gentler auto-format (only formats when JSON is valid and looks unformatted)
   useEffect(() => {
     if (!autoFormat) return
     const res = safeJsonParse(raw)
     if (!res.ok) return
-    // If it’s already multi-line and indented, do nothing
     if (raw.includes('\n') && raw.includes('  ')) return
     const pretty = JSON.stringify(res.value, null, 2)
     if (pretty !== raw) setRaw(pretty)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoFormat])
 
-  // Optional: during active search, expand tree so people can visually find stuff
-  const treeCollapsed = search.trim().length >= 2 ? false : collapsed
+  // IMPORTANT: let buttons control collapse/expand (don’t override during search)
+  const treeCollapsed = collapsed
 
-  // Optional: theme-aware page background gradient
+  // Theme-aware page background gradient
   const pageBg =
     theme === 'dark'
       ? 'radial-gradient(900px 500px at 20% 0%, rgba(107,99,255,0.35), transparent 60%), var(--m-bg)'
       : 'radial-gradient(900px 500px at 20% 0%, rgba(107,99,255,0.18), transparent 60%), var(--m-bg)'
 
-  // Optional: theme-aware JSON viewer theme
+  // Theme-aware JSON viewer theme
   const rjvTheme = theme === 'dark' ? ('monokai' as any) : ('rjv-default' as any)
 
   return (
@@ -397,6 +406,7 @@ export default function Page() {
           <div style={{ marginTop: 10 }}>
             {parsed.ok ? (
               <ReactJson
+                key={viewerKey} // force remount so expand/collapse always works
                 src={parsed.value ?? {}}
                 name={null}
                 collapsed={treeCollapsed}
